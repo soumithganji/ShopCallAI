@@ -4,6 +4,7 @@ LLM used only for: extracting product/location intent, clarification, report.
 """
 import asyncio
 import re
+import config
 from llm import chat_json
 from agents.location_agent import parse_location_from_text
 from agents.search_agent import find_stores
@@ -31,7 +32,7 @@ def new_session() -> dict:
     }
 
 
-async def process_message(user_text: str, session: dict) -> str:
+async def process_message(user_text: str, session: dict, progress: dict | None = None) -> str:
     session["messages"].append({"role": "user", "content": user_text})
 
     # Parallelize location + product extraction on first message
@@ -92,13 +93,35 @@ async def process_message(user_text: str, session: dict) -> str:
             session["messages"].append({"role": "assistant", "content": msg})
             return msg
 
+        if progress is not None:
+            progress["stores"] = [
+                {"name": s.get("name", ""), "address": s.get("address", ""), "phone": s.get("phone", ""), "status": "pending"}
+                for s in session["stores"]
+            ]
+
     # Step 5: call stores
     if session["call_results"] is None:
+        if progress is not None:
+            progress["phase"] = "calling"
+
+        async def _on_status(store, status):
+            if progress is None:
+                return
+            for entry in progress.get("stores", []):
+                if entry["name"] == store.get("name"):
+                    entry["status"] = status
+                    break
+
         session["call_results"] = await call_all_stores(
             session["stores"],
             session["product"],
             session["product_details"],
+            max_parallel=len(session["stores"]),
+            on_status=_on_status,
         )
+
+        if progress is not None:
+            progress["phase"] = "done"
 
     # Step 6: report
     report = await generate_report(
