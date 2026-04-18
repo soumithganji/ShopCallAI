@@ -1,0 +1,12 @@
+[agent]
+name = "shopping-caller"
+entrypoint = "agent.py"
+description = "Calls local stores to check product availability on behalf of a user"
+
+[telephony]
+# Assign a phone number from app.voicerun.com -> Phone Numbers
+# phone_number = "+1XXXXXXXXXX"
+
+[environment.production]
+# Secrets injected at deploy time; set via: vr secrets set KEY VALUE
+secrets = ["VOICERUN_API_KEY"]
