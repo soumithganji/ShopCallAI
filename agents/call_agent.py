@@ -13,6 +13,8 @@ _TERMINAL_STATUSES = {"completed", "ended", "no_answer", "busy", "failed", "canc
 
 # Shared dict: telephonyCallId -> result dict (populated by webhook in main.py)
 call_results_store: dict[str, dict] = {}
+# Shared dict: store_phone -> outcome dict (populated by /outcome endpoint)
+phone_outcomes: dict[str, dict] = {}
 
 
 async def call_store(
@@ -49,6 +51,8 @@ async def call_store(
             "product": product,
             "product_details": product_details,
             "store_name": store.get("name", "the store"),
+            "store_phone": store.get("phone", ""),
+            "outcome_webhook_url": config.VOICERUN_WEBHOOK_URL.replace("/webhook", "/outcome") if config.VOICERUN_WEBHOOK_URL else "",
         },
     }
 
@@ -79,7 +83,7 @@ async def call_store(
                 session_id = data.get("sessionId") or data.get("id", "")
 
                 await _emit("in_call")
-                outcome = await _wait_for_result(call_id, session_id)
+                outcome = await _wait_for_result(call_id, session_id, store.get("phone", ""))
                 last_status = outcome.get("status", "unknown")
 
                 if last_status == "completed":
@@ -117,10 +121,11 @@ async def call_store(
     return _result(store, "unreachable", last_status)
 
 
-async def _wait_for_result(call_id: str, session_id: str = "") -> dict:
+async def _wait_for_result(call_id: str, session_id: str = "", store_phone: str = "") -> dict:
     """
-    1. Poll call_results_store for webhook data (fast path).
-    2. If webhook not configured or slow, also poll VoiceRun sessions API.
+    1. Poll phone_outcomes for direct outcome POSTs from handler (fastest).
+    2. Poll call_results_store for Twilio webhook status.
+    3. Fall back to VoiceRun API polling.
     """
     if not call_id and not session_id:
         await asyncio.sleep(config.CALL_POLL_TIMEOUT_SECONDS)
@@ -128,14 +133,42 @@ async def _wait_for_result(call_id: str, session_id: str = "") -> dict:
 
     deadline = time.monotonic() + config.CALL_POLL_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        # Webhook fast path
+        # Direct outcome from handler POST (has in_stock + price_info)
+        if store_phone and store_phone in phone_outcomes:
+            o = phone_outcomes.pop(store_phone)
+            return {"status": "completed", "outcome": o.get("in_stock", "unknown"), "price_info": o.get("price_info", ""), "transcript": ""}
+
+        # Twilio webhook fast path (has status but no outcome)
         for key in (call_id, session_id):
             if key and key in call_results_store:
-                return call_results_store.pop(key)
+                result = call_results_store.pop(key)
+                # Grace period: wait for /outcome POST from handler
+                if store_phone and result.get("status") == "completed":
+                    grace_deadline = time.monotonic() + 5
+                    while time.monotonic() < grace_deadline:
+                        if store_phone in phone_outcomes:
+                            break
+                        await asyncio.sleep(0.5)
+                if store_phone and store_phone in phone_outcomes:
+                    o = phone_outcomes.pop(store_phone)
+                    result["outcome"] = o.get("in_stock", result.get("outcome", "unknown"))
+                    result["price_info"] = o.get("price_info", "")
+                return result
 
         # API polling fallback
         api_result = await _poll_voicerun_api(call_id, session_id)
         if api_result:
+            # Grace period: wait for /outcome POST from handler before returning
+            if store_phone and api_result.get("status") == "completed":
+                grace_deadline = time.monotonic() + 5
+                while time.monotonic() < grace_deadline:
+                    if store_phone in phone_outcomes:
+                        break
+                    await asyncio.sleep(0.5)
+            if store_phone and store_phone in phone_outcomes:
+                o = phone_outcomes.pop(store_phone)
+                api_result["outcome"] = o.get("in_stock", "unknown")
+                api_result["price_info"] = o.get("price_info", "")
             return api_result
 
         await asyncio.sleep(config.CALL_POLL_INTERVAL_SECONDS)
@@ -144,28 +177,47 @@ async def _wait_for_result(call_id: str, session_id: str = "") -> dict:
 
 
 async def _poll_voicerun_api(call_id: str, session_id: str) -> dict | None:
-    """Check VoiceRun sessions list for terminal status. Returns result or None."""
+    """Check VoiceRun sessions for terminal status + outcomes. Returns result or None."""
     try:
-        headers = {
-            "Authorization": f"Bearer {config.VOICERUN_API_KEY}",
-        }
-        url = f"{config.VOICERUN_API_BASE}/agents/{config.VOICERUN_AGENT_ID}/sessions"
+        headers = {"Authorization": f"Bearer {config.VOICERUN_API_KEY}"}
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url, headers=headers)
+            # First find session via list endpoint
+            list_url = f"{config.VOICERUN_API_BASE}/agents/{config.VOICERUN_AGENT_ID}/sessions"
+            resp = await client.get(list_url, headers=headers)
             if resp.status_code != 200:
                 return None
             sessions = resp.json().get("data", [])
+            matched_id = None
+            raw_status = None
             for s in sessions:
                 if s.get("telephonyCallId") == call_id or s.get("id") == session_id:
                     raw_status = s.get("status", "").lower()
-                    if raw_status in _TERMINAL_STATUSES:
-                        return {
-                            "status": _map_voicerun_status(raw_status),
-                            "outcome": raw_status,
-                            "transcript": "",
-                            "price_info": "",
-                        }
-                    return None  # still in progress
+                    matched_id = s.get("id")
+                    break
+
+            if not matched_id or raw_status not in _TERMINAL_STATUSES:
+                return None
+
+            # Fetch individual session for outcomes
+            detail_resp = await client.get(
+                f"{config.VOICERUN_API_BASE}/sessions/{matched_id}",
+                headers=headers,
+            )
+            outcomes = {}
+            if detail_resp.status_code == 200:
+                detail = detail_resp.json().get("data", {})
+                for o in (detail.get("outcomes") or []):
+                    outcomes[o.get("name")] = o.get("value")
+                testing = detail.get("testing") or {}
+                if isinstance(testing, dict):
+                    outcomes.update(testing)
+
+            return {
+                "status": _map_voicerun_status(raw_status),
+                "outcome": outcomes.get("in_stock", "unknown"),
+                "transcript": "",
+                "price_info": outcomes.get("price_info", ""),
+            }
     except Exception:
         pass
     return None

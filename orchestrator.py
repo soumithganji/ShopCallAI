@@ -122,6 +122,20 @@ async def process_message(user_text: str, session: dict, progress: dict | None =
 
         if progress is not None:
             progress["phase"] = "done"
+            # Update cards with final outcomes
+            for result in session["call_results"]:
+                store_name = result["store"].get("name", "")
+                outcome = result.get("outcome", "unknown")
+                call_status = result.get("status", "unknown")
+                for entry in progress.get("stores", []):
+                    if entry["name"] == store_name:
+                        if call_status == "completed":
+                            entry["status"] = "in_stock" if outcome == "yes" else ("out_of_stock" if outcome == "no" else "completed")
+                        else:
+                            entry["status"] = call_status
+                        if result.get("price_info"):
+                            entry["price_info"] = result["price_info"]
+                        break
 
     # Step 6: report
     report = await generate_report(

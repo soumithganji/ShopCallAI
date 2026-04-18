@@ -25,12 +25,17 @@ async def generate_report(
     prompt = (
         f"Write a short, clear report for a user who asked to find '{product}' near {location}.\n\n"
         f"Call results: {results_summary}\n\n"
-        "Format:\n"
-        "- One line per store with status icon (✓ in stock, ✗ out of stock or unreachable)\n"
-        "- Include price and address if available\n"
-        "- End with a 1-line recommendation (best option or next steps)\n"
-        "- Keep it under 150 words total\n"
-        "- No markdown headers, just plain structured text"
+        "Rules for each store line:\n"
+        "- outcome='yes' → ✓ In stock (include price_info if present)\n"
+        "- outcome='no' → ✗ Out of stock\n"
+        "- outcome='unknown' and status='completed' → ~ Reached, stock unknown\n"
+        "- status='no_answer' → 📵 No answer\n"
+        "- status='busy' → 📵 Line busy\n"
+        "- status in (unreachable, failed, timeout) → ✗ Couldn't reach\n"
+        "- status='skipped' → skip this store entirely\n"
+        "Format: one line per store: [icon] [Store Name] | [address] | [status detail]\n"
+        "End with a 1-line recommendation.\n"
+        "No markdown headers. Under 150 words."
     )
 
     msg = await chat([{"role": "user", "content": prompt}], temperature=0.2)

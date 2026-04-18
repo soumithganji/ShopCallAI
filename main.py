@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from orchestrator import new_session, process_message
 from agents.location_agent import reverse_geocode
-from agents.call_agent import call_results_store
+from agents.call_agent import call_results_store, phone_outcomes
 
 app = FastAPI(title="Shopping Agent")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -49,6 +49,19 @@ async def chat(req: MessageRequest):
     return MessageResponse(session_id=sid, reply=reply)
 
 
+@app.post("/outcome")
+async def voicerun_outcome(request: Request):
+    """Direct outcome POST from VoiceRun handler when stock decision is made."""
+    body = await request.json()
+    phone = body.get("store_phone", "")
+    if phone:
+        phone_outcomes[phone] = {
+            "in_stock": body.get("in_stock", "unknown"),
+            "price_info": body.get("price_info", ""),
+        }
+    return {"received": True}
+
+
 @app.get("/progress/{session_id}")
 async def get_progress(session_id: str):
     return _progress.get(session_id, {"phase": "idle", "stores": []})
@@ -63,17 +76,76 @@ async def clear_session(session_id: str):
 
 @app.post("/webhook")
 async def voicerun_webhook(request: Request):
-    """Receives VoiceRun call status callbacks."""
-    body = await request.json()
-    call_id = body.get("telephonyCallId") or body.get("sessionId", "")
-    if call_id:
-        call_results_store[call_id] = {
-            "status": _map_voicerun_status(body.get("status", "")),
-            "outcome": body.get("outcome"),
-            "transcript": body.get("transcript", ""),
-            "price_info": body.get("parameters", {}).get("price_info", ""),
+    """Receives Twilio status callbacks (fired by VoiceRun when call ends)."""
+    raw = await request.body()
+    try:
+        body = await request.json()
+    except Exception:
+        from urllib.parse import parse_qs
+        parsed = parse_qs(raw.decode("utf-8", errors="replace"))
+        body = {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}
+
+    # Twilio form-encoded: CallSid = telephonyCallId, CallStatus = status
+    call_sid = body.get("CallSid") or body.get("telephonyCallId") or body.get("sessionId", "")
+    raw_status = body.get("CallStatus") or body.get("status", "")
+    mapped_status = _map_voicerun_status(raw_status)
+
+    if call_sid and mapped_status in ("completed", "no_answer", "busy", "failed"):
+        # Fetch VoiceRun session to get conversation outcomes
+        outcomes = await _fetch_voicerun_outcomes(call_sid)
+        call_results_store[call_sid] = {
+            "status": mapped_status,
+            "outcome": outcomes.get("in_stock", "unknown"),
+            "transcript": "",
+            "price_info": outcomes.get("price_info", ""),
         }
+
     return {"received": True}
+
+
+async def _fetch_voicerun_outcomes(telephony_call_id: str) -> dict:
+    """Poll VoiceRun until session is completed, then extract outcomes."""
+    import asyncio, httpx, config as cfg, logging
+    _TERMINAL = {"completed", "ended", "failed", "cancelled", "no_answer", "busy"}
+    headers = {"Authorization": f"Bearer {cfg.VOICERUN_API_KEY}"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Find session id from telephonyCallId
+            session_id = None
+            for _ in range(20):  # poll up to ~40s
+                r = await client.get(
+                    f"https://api.voicerun.com/v1/agents/{cfg.VOICERUN_AGENT_ID}/sessions",
+                    headers=headers,
+                )
+                if r.status_code != 200:
+                    break
+                for s in r.json().get("data", []):
+                    if s.get("telephonyCallId") == telephony_call_id:
+                        session_id = s["id"]
+                        if s.get("status", "").lower() in _TERMINAL:
+                            break
+                        session_id = None  # still in progress
+                if session_id:
+                    break
+                await asyncio.sleep(2)
+
+            if not session_id:
+                return {}
+
+            r2 = await client.get(f"https://api.voicerun.com/v1/sessions/{session_id}", headers=headers)
+            if r2.status_code == 200:
+                d = r2.json().get("data", {})
+                logging.warning(f"FINAL SESSION: testing={d.get('testing')} outcomes={d.get('outcomes')} events_count={len(d.get('events') or [])}")
+                outcomes = {}
+                for o in (d.get("outcomes") or []):
+                    outcomes[o.get("name")] = o.get("value")
+                testing = d.get("testing") or {}
+                if isinstance(testing, dict):
+                    outcomes.update(testing)
+                return outcomes
+    except Exception:
+        pass
+    return {}
 
 
 def _map_voicerun_status(vr_status: str) -> str:
@@ -122,6 +194,8 @@ def _chat_ui() -> str:
   .store-card.calling { border-color: #f59e0b; background: #fffbeb; }
   .store-card.in_call { border-color: #3b82f6; background: #eff6ff; }
   .store-card.completed { border-color: #10b981; background: #f0fdf4; }
+  .store-card.in_stock { border-color: #10b981; background: #f0fdf4; }
+  .store-card.out_of_stock { border-color: #6b7280; background: #f9fafb; }
   .store-card.failed, .store-card.no_answer, .store-card.busy, .store-card.unreachable, .store-card.timeout { border-color: #ef4444; background: #fef2f2; }
   .store-info { flex: 1; min-width: 0; }
   .store-name { font-weight: 600; color: #111; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -131,6 +205,8 @@ def _chat_ui() -> str:
   .badge-calling { background: #fef3c7; color: #92400e; }
   .badge-in_call { background: #dbeafe; color: #1e40af; }
   .badge-completed { background: #d1fae5; color: #065f46; }
+  .badge-in_stock { background: #d1fae5; color: #065f46; }
+  .badge-out_of_stock { background: #f3f4f6; color: #374151; }
   .badge-failed, .badge-no_answer, .badge-busy, .badge-unreachable, .badge-timeout { background: #fee2e2; color: #991b1b; }
   .badge-skipped { background: #f3f4f6; color: #6b7280; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
@@ -168,12 +244,14 @@ def _chat_ui() -> str:
 
   const STATUS_LABEL = {
     pending: 'Pending', calling: 'Calling...', in_call: 'In call',
-    completed: 'Done', failed: 'Failed', no_answer: 'No answer',
+    completed: 'Reached', in_stock: 'In Stock', out_of_stock: 'Out of Stock',
+    failed: 'Failed', no_answer: 'No Answer',
     busy: 'Busy', unreachable: 'Unreachable', timeout: 'Timeout', skipped: 'Skipped',
   };
   const STATUS_ICON = {
     pending: '⏳', calling: '📞', in_call: '🔊',
-    completed: '✅', failed: '❌', no_answer: '📵',
+    completed: '✅', in_stock: '✅', out_of_stock: '✗',
+    failed: '❌', no_answer: '📵',
     busy: '📵', unreachable: '❌', timeout: '⏱', skipped: '–',
   };
 
@@ -252,12 +330,30 @@ def _chat_ui() -> str:
       });
       const data = await res.json();
       sessionId = data.session_id;
-      stopPolling();
 
-      // Final poll to sync final states
-      const pr = await fetch('/progress/' + sessionId);
-      const pd = await pr.json();
-      if (pd.stores && pd.stores.length > 0) renderStores(pd.stores);
+      // Keep polling until all stores reach terminal state (only if stores exist)
+      const TERMINAL = new Set(['completed','in_stock','out_of_stock','failed','no_answer','busy','unreachable','timeout','skipped']);
+      const allDone = stores => stores.length > 0 && stores.every(s => TERMINAL.has(s.status));
+      stopPolling();
+      const prCheck = await fetch('/progress/' + sessionId);
+      const pdCheck = await prCheck.json();
+      if (pdCheck.stores && pdCheck.stores.length > 0) {
+        renderStores(pdCheck.stores);
+        if (!allDone(pdCheck.stores)) {
+          startPolling(sessionId);
+          await new Promise(resolve => {
+            const check = setInterval(async () => {
+              try {
+                const pr = await fetch('/progress/' + sessionId);
+                const pd = await pr.json();
+                if (pd.stores && pd.stores.length > 0) renderStores(pd.stores);
+                if (allDone(pd.stores || [])) { clearInterval(check); stopPolling(); resolve(); }
+              } catch(_) {}
+            }, 1000);
+            setTimeout(() => { clearInterval(check); stopPolling(); resolve(); }, 30000);
+          });
+        }
+      }
 
       loading.textContent = data.reply;
     } catch (e) {
