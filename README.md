@@ -1,6 +1,6 @@
 # ShopCallAI
 
-An AI agent that calls local stores on your behalf to check if a product is in stock — so you don't have to.
+An AI voice agent that calls local stores on your behalf to check if a product is in stock — so you don't have to.
 
 ---
 
