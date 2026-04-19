@@ -1,14 +1,12 @@
 import uuid
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from orchestrator import new_session, process_message
 from agents.location_agent import reverse_geocode
 from agents.call_agent import call_results_store, phone_outcomes
 
 app = FastAPI(title="Shopping Agent")
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
 _sessions: dict[str, dict] = {}
 _progress: dict[str, dict] = {}  # session_id -> {phase, stores: [{name,address,phone,status}]}
@@ -34,10 +32,15 @@ async def chat(req: MessageRequest):
     session = _sessions[sid]
 
     # Inject browser geolocation on first message if location not yet set
+    import logging
     if req.lat is not None and req.lng is not None and not session["location"]:
+        logging.warning(f"[GEO] got lat={req.lat} lng={req.lng}")
         loc = reverse_geocode(req.lat, req.lng)
+        logging.warning(f"[GEO] reverse_geocode returned: {loc}")
         if loc:
             session["location"] = loc
+    else:
+        logging.warning(f"[GEO] no lat/lng in request: lat={req.lat} lng={req.lng} location_set={session['location'] is not None}")
 
     progress = _progress.setdefault(sid, {"phase": "idle", "stores": []})
 
@@ -234,12 +237,16 @@ def _chat_ui() -> str:
   let pollTimer = null;
   let storesPanelEl = null;
 
+  sendBtn.disabled = true;
+  locBadge.textContent = '📍 Getting location...';
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
-      pos => { userLat = pos.coords.latitude; userLng = pos.coords.longitude; locBadge.textContent = '📍 Location detected'; },
-      () => { locBadge.textContent = '📍 Location unavailable'; },
-      { timeout: 8000, maximumAge: 300000 }
+      pos => { userLat = pos.coords.latitude; userLng = pos.coords.longitude; locBadge.textContent = '📍 Location detected'; sendBtn.disabled = false; inputEl.focus(); },
+      () => { locBadge.textContent = '📍 Location unavailable'; sendBtn.disabled = false; inputEl.focus(); },
+      { timeout: 5000, maximumAge: 300000 }
     );
+  } else {
+    locBadge.textContent = ''; sendBtn.disabled = false;
   }
 
   const STATUS_LABEL = {

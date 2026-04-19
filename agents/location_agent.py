@@ -1,8 +1,12 @@
+import ssl
+import certifi
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+from geopy.adapters import AioHTTPAdapter
 from llm import chat_json
 
-_geocoder = Nominatim(user_agent="shopping-agent/1.0")
+_ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+_geocoder = Nominatim(user_agent="shopping-agent/1.0", ssl_context=_ssl_ctx)
 
 
 def geocode(location_text: str) -> dict | None:

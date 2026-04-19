@@ -5,7 +5,7 @@ load_dotenv()
 
 BASETEN_API_KEY = os.environ["BASETEN_API_KEY"]
 BASETEN_BASE_URL = os.getenv("BASETEN_BASE_URL", "https://inference.baseten.co/v1")
-BASETEN_MODEL = os.getenv("BASETEN_MODEL", "meta-llama/Llama-3.1-70B-Instruct")
+BASETEN_MODEL = os.getenv("BASETEN_MODEL", "")
 
 YOU_API_KEY = os.environ["YOU_API_KEY"]
 YOU_SEARCH_URL = "https://ydc-index.io/v1/search"
