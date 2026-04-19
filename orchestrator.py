@@ -6,10 +6,10 @@ import asyncio
 import re
 import config
 from llm import chat_json
-from agents.location_agent import parse_location_from_text
-from agents.search_agent import find_stores
-from agents.call_agent import call_all_stores
-from agents.report_agent import generate_report
+from services.geo import parse_location_from_text
+from services.places import find_stores
+from services.calls import call_all_stores
+from services.report import generate_report
 
 # Products that never need clarification
 _SIMPLE_PRODUCTS = re.compile(
