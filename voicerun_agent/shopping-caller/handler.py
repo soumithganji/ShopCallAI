@@ -7,17 +7,34 @@ from primfunctions.context import Context
 from primfunctions.completions import configure_provider, generate_chat_completion
 
 
-async def _post_outcome(url: str, store_phone: str, in_stock: str, price_info: str):
+def _do_post(url: str, payload: dict):
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    urllib.request.urlopen(req, timeout=5)
+
+
+async def _save_outcome(url: str, store_phone: str, store_name: str, product: str, request_id: str, in_stock: str, price_info: str):
+    """Fire-and-forget with 3 retries. Does not block the caller."""
     if not url:
         return
-    def _do_post():
-        try:
-            data = json.dumps({"store_phone": store_phone, "in_stock": in_stock, "price_info": price_info}).encode()
-            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-            urllib.request.urlopen(req, timeout=5)
-        except Exception:
-            pass
-    await asyncio.get_event_loop().run_in_executor(None, _do_post)
+    payload = {
+        "store_phone": store_phone,
+        "store_name": store_name,
+        "product": product,
+        "request_id": request_id,
+        "in_stock": in_stock,
+        "price_info": price_info,
+    }
+    async def _run():
+        loop = asyncio.get_event_loop()
+        for attempt in range(3):
+            try:
+                await loop.run_in_executor(None, _do_post, url, payload)
+                return
+            except Exception:
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+    asyncio.create_task(_run())
 
 _GREETING = re.compile(
     r"^\s*(hello+|hi+|hey+|yes\?*|yeah\?*|yep\?*|uh+|um+|speak(ing)?|"
@@ -39,7 +56,9 @@ async def handler(event: Event, context: Context):
     product_details = context.variables.get("product_details", "")
     store_name = context.variables.get("store_name", "the store")
     outcome_url = context.variables.get("outcome_webhook_url", "")
+    save_url = context.variables.get("save_outcome_url", "")
     store_phone = context.variables.get("store_phone", "")
+    request_id = context.variables.get("request_id", "")
 
     if isinstance(event, StartEvent):
         # TTS first — configure_provider called lazily in TextEvent to avoid blocking
@@ -69,12 +88,11 @@ async def handler(event: Event, context: Context):
             if _YES.search(user_said) and not _NO.search(user_said):
                 context.set_data("stage", "asked_price")
                 context.set_testing_metadata("in_stock", "yes")
-                await _post_outcome(outcome_url, store_phone, "yes", "")
                 yield TextToSpeechEvent(text="Great! What's the price, and how many do you have?", voice="kore")
             elif _NO.search(user_said) and not _YES.search(user_said):
                 context.set_data("stage", "done")
                 context.set_testing_metadata("in_stock", "no")
-                await _post_outcome(outcome_url, store_phone, "no", "")
+                await _save_outcome(save_url, store_phone, store_name, product, request_id, "no", "")
                 yield StopEvent(closing_speech="Okay, thank you! Have a great day.")
             elif _GREETING.match(user_said):
                 yield TextToSpeechEvent(text=reask, voice="kore")
@@ -96,12 +114,11 @@ async def handler(event: Event, context: Context):
                 if "YES" in verdict:
                     context.set_data("stage", "asked_price")
                     context.set_testing_metadata("in_stock", "yes")
-                    await _post_outcome(outcome_url, store_phone, "yes", "")
                     yield TextToSpeechEvent(text="Great! What's the price, and how many do you have?", voice="kore")
                 elif "NO" in verdict:
                     context.set_data("stage", "done")
                     context.set_testing_metadata("in_stock", "no")
-                    await _post_outcome(outcome_url, store_phone, "no", "")
+                    await _save_outcome(save_url, store_phone, store_name, product, request_id, "no", "")
                     yield StopEvent(closing_speech="Okay, thank you! Have a great day.")
                 else:
                     yield TextToSpeechEvent(text=reask, voice="kore")
@@ -113,5 +130,5 @@ async def handler(event: Event, context: Context):
                 context.set_data("price_info", user_said)
                 context.set_testing_metadata("price_info", user_said)
                 context.set_data("stage", "done")
-                await _post_outcome(outcome_url, store_phone, "yes", user_said)
+                await _save_outcome(save_url, store_phone, store_name, product, request_id, "yes", user_said)
                 yield StopEvent(closing_speech="Perfect, thank you! Have a great day!")
