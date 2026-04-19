@@ -6,4 +6,5 @@ python-dotenv>=1.0.0
 geopy>=2.4.0
 youdotcom>=0.2.0
 pydantic>=2.7.0
+motor>=3.3.0
 # VoiceRun CLI installed separately: pip install voicerun-cli

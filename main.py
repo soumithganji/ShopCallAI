@@ -1,12 +1,30 @@
 import uuid
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from motor.motor_asyncio import AsyncIOMotorClient
 from orchestrator import new_session, process_message
 from agents.location_agent import reverse_geocode
 from agents.call_agent import call_results_store, phone_outcomes
+import config
 
 app = FastAPI(title="Shopping Agent")
+
+_mongo_client: AsyncIOMotorClient | None = None
+
+def _db():
+    return _mongo_client[config.MONGODB_DB]
+
+@app.on_event("startup")
+async def startup():
+    global _mongo_client
+    _mongo_client = AsyncIOMotorClient(config.MONGODB_URI)
+
+@app.on_event("shutdown")
+async def shutdown():
+    if _mongo_client:
+        _mongo_client.close()
 
 _sessions: dict[str, dict] = {}
 _progress: dict[str, dict] = {}  # session_id -> {phase, stores: [{name,address,phone,status}]}
@@ -63,6 +81,37 @@ async def voicerun_outcome(request: Request):
             "price_info": body.get("price_info", ""),
         }
     return {"received": True}
+
+
+@app.post("/save-outcome")
+async def save_outcome(request: Request):
+    """Persist call outcome to MongoDB. Also updates phone_outcomes for in-memory race."""
+    body = await request.json()
+    phone = body.get("store_phone", "")
+    if phone:
+        phone_outcomes[phone] = {
+            "in_stock": body.get("in_stock", "unknown"),
+            "price_info": body.get("price_info", ""),
+        }
+    doc = {
+        "request_id": body.get("request_id", ""),
+        "store_phone": phone,
+        "store_name": body.get("store_name", ""),
+        "product": body.get("product", ""),
+        "in_stock": body.get("in_stock", "unknown"),
+        "price_info": body.get("price_info", ""),
+        "created_at": datetime.now(timezone.utc),
+    }
+    await _db().call_outcomes.insert_one(doc)
+    return {"saved": True}
+
+
+@app.get("/results/{request_id}")
+async def get_results(request_id: str):
+    """Fetch all store call outcomes for a request_id."""
+    cursor = _db().call_outcomes.find({"request_id": request_id}, {"_id": 0})
+    results = await cursor.to_list(length=100)
+    return {"request_id": request_id, "results": results}
 
 
 @app.get("/progress/{session_id}")

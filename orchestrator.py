@@ -116,7 +116,6 @@ async def process_message(user_text: str, session: dict, progress: dict | None =
             session["stores"],
             session["product"],
             session["product_details"],
-            max_parallel=len(session["stores"]),
             on_status=_on_status,
         )
 

@@ -1,5 +1,6 @@
 import asyncio
 import time
+import uuid
 import httpx
 import config
 
@@ -21,6 +22,7 @@ async def call_store(
     store: dict,
     product: str,
     product_details: str = "",
+    request_id: str = "",
     max_retries: int = config.CALL_MAX_RETRIES,
     retry_delay: int = config.CALL_RETRY_DELAY_SECONDS,
     on_status=None,
@@ -52,7 +54,9 @@ async def call_store(
             "product_details": product_details,
             "store_name": store.get("name", "the store"),
             "store_phone": store.get("phone", ""),
+            "request_id": request_id,
             "outcome_webhook_url": config.VOICERUN_WEBHOOK_URL.replace("/webhook", "/outcome") if config.VOICERUN_WEBHOOK_URL else "",
+            "save_outcome_url": config.VOICERUN_WEBHOOK_URL.replace("/webhook", "/save-outcome") if config.VOICERUN_WEBHOOK_URL else "",
         },
     }
 
@@ -239,12 +243,11 @@ async def call_all_stores(
     stores: list[dict],
     product: str,
     product_details: str = "",
-    max_parallel: int = config.MAX_STORES_TO_CALL,
     on_status=None,
 ) -> list[dict]:
-    targets = stores[:max_parallel]
+    request_id = str(uuid.uuid4())
     return await asyncio.gather(*[
-        call_store(s, product, product_details, on_status=on_status) for s in targets
+        call_store(s, product, product_details, request_id=request_id, on_status=on_status) for s in stores
     ])
 
 
