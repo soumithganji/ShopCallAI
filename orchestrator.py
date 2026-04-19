@@ -3,21 +3,12 @@ State-driven orchestrator. Flow controlled by session state.
 LLM used only for: extracting product/location intent, clarification, report.
 """
 import asyncio
-import re
 import config
 from llm import chat_json
 from services.geo import parse_location_from_text
 from services.places import find_stores
 from services.calls import call_all_stores
 from services.report import generate_report
-
-# Products that never need clarification
-_SIMPLE_PRODUCTS = re.compile(
-    r"\b(duct tape|tape|batteries|battery|notebook|pen|pencil|staples|"
-    r"paper|scissors|glue|bandage|aspirin|ibuprofen|advil|tylenol|"
-    r"lighter|matches|zip ties|extension cord|light bulb)\b",
-    re.IGNORECASE,
-)
 
 
 def new_session() -> dict:
@@ -62,14 +53,13 @@ async def process_message(user_text: str, session: dict, progress: dict | None =
         session["messages"].append({"role": "assistant", "content": q})
         return q
 
-    # Step 3: clarification — skip for simple products, use regex not LLM
+    # Step 3: clarification — LLM decides if needed
     if not session["asked_clarification"] and not session["product_details"]:
         session["asked_clarification"] = True
-        if not _SIMPLE_PRODUCTS.search(session["product"]):
-            clarification = await _ask_clarification(session["product"], user_text)
-            if clarification:
-                session["messages"].append({"role": "assistant", "content": clarification})
-                return clarification
+        clarification = await _ask_clarification(session["product"], user_text)
+        if clarification:
+            session["messages"].append({"role": "assistant", "content": clarification})
+            return clarification
 
     # Capture details if user just answered clarification
     if session["asked_clarification"] and not session["stores"] and not session["product_details"]:
@@ -163,7 +153,9 @@ async def _ask_clarification(product: str, user_text: str) -> str | None:
         "role": "user",
         "content": (
             f"User wants to buy: '{product}'. Message: \"{user_text}\"\n"
-            "One clarifying question needed? (size/brand/type — only if critical for store search)\n"
+            "Do you need ONE clarifying question (size/brand/type) to meaningfully improve the store search?\n"
+            "Return null if the product is unambiguous (e.g. batteries, tape, aspirin, pen) or already specific enough.\n"
+            "Only ask if ambiguity would cause calling wrong stores entirely.\n"
             'Return JSON: {"question": "short question or null"}'
         ),
     }])

@@ -1,6 +1,5 @@
 """
 Store search using Google Maps Places API (Nearby Search).
-Phone numbers come directly from nearby search results — no extra Place Details calls needed.
 """
 import asyncio
 import re
