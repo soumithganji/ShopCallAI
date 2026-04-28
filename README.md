@@ -6,7 +6,7 @@ An AI voice agent that calls local stores on your behalf to check if a product i
 
 ## The Problem
 
-When you search for a product on Google, you get two kinds of results:
+When you search for a product online, you get two kinds of results:
 
 1. **Online retailers** — Amazon, eBay, etc. You'll wait days for delivery.
 2. **Big-box chains** — Walmart, Target, Best Buy. They have online inventory systems.
