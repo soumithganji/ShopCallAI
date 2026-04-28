@@ -25,7 +25,7 @@ ShopCallAI bridges that gap. You type what you need. The agent:
 
 1. **Detects your location** (via browser geolocation or text)
 2. **Finds nearby relevant stores** using Google Maps
-3. **Calls every store** using a voice AI agent
+3. **Calls every store** using an AI voice agent
 4. **Reports back** which stores have it, at what price
 
 You go from "I need duct tape" to knowing exactly which hardware stores near you have it in stock — in under two minutes, without making a single call yourself.
